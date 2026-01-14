@@ -1,14 +1,23 @@
 export interface IChatItem {
   id: string;
-  role?: 'user' | 'assistant';
+  role?: 'user' | 'assistant' | 'approval';
   content: string;
   duration?: number; // response time in ms
   attachments?: IFileAttachment[]; // File attachments
   annotations?: IAnnotation[]; // Citations/references from AI agent
+  mcpApproval?: IMcpApprovalRequest; // MCP tool approval request
   more?: {
     time?: string; // ISO timestamp
     usage?: IUsageInfo; // Usage info from backend
   };
+}
+
+export interface IMcpApprovalRequest {
+  id: string;
+  toolName: string;
+  serverLabel: string;
+  arguments?: string;
+  previousResponseId?: string;
 }
 
 export interface IUsageInfo {

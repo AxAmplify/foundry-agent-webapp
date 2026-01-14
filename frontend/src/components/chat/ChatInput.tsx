@@ -7,7 +7,7 @@ import {
 import { Button, Toast, ToastTitle, Toaster, useId, useToastController, Text, makeStyles, tokens } from '@fluentui/react-components';
 import { Attach24Regular, Settings24Regular, ChatAdd24Regular, Stop24Regular } from '@fluentui/react-icons';
 import { FilePreview } from './FilePreview';
-import { validateImageFile, validateFileCount } from '../../utils/fileAttachments';
+import { validateFile, validateFileCount } from '../../utils/fileAttachments';
 import styles from './ChatInput.module.css';
 
 const CHAR_WARNING_THRESHOLD = 3000;
@@ -144,7 +144,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // Validate each file
     const validFiles: File[] = [];
     for (const file of files) {
-      const validation = validateImageFile(file);
+      const validation = validateFile(file);
       if (!validation.valid) {
         dispatchToast(
           <Toast>
@@ -208,7 +208,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     // Validate each file
     const validFiles: File[] = [];
     for (const file of files) {
-      const validation = validateImageFile(file);
+      const validation = validateFile(file);
       if (!validation.valid) {
         dispatchToast(
           <Toast>
@@ -308,7 +308,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         multiple
         style={{ display: 'none' }}
         onChange={handleFileSelect}
-        accept="image/*"
+        accept="image/*,.pdf,.txt,.md,.csv,.json,.html,.xml"
       />
     </div>
     </>

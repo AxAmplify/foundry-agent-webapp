@@ -136,6 +136,32 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
       };
     }
 
+    case 'CHAT_MCP_APPROVAL_REQUEST': {
+      // Add approval request as a special message
+      const approvalMessage = {
+        id: `approval-${action.messageId}`,
+        role: 'approval' as const,
+        content: '',
+        mcpApproval: {
+          ...action.approvalRequest,
+          previousResponseId: action.previousResponseId || '',
+        },
+      };
+      
+      return {
+        ...state,
+        chat: {
+          ...state.chat,
+          messages: [...state.chat.messages, approvalMessage],
+          status: 'idle',
+        },
+        ui: {
+          ...state.ui,
+          chatInputEnabled: false, // Keep disabled until approval
+        },
+      };
+    }
+
     case 'CHAT_STREAM_COMPLETE': {
       // Update the completed message with usage info
       const updatedMessages = state.chat.messages.map(msg =>

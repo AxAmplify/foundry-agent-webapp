@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState } from "react";
 import { AssistantMessage } from "./chat/AssistantMessage";
 import { UserMessage } from "./chat/UserMessage";
+import { McpApprovalCard } from "./chat/McpApprovalCard";
 import { StarterMessages } from "./chat/StarterMessages";
 import { ChatInput } from "./chat/ChatInput";
 import { Waves } from "./animations/Waves";
@@ -17,6 +18,7 @@ interface ChatInterfaceProps {
   error: AppError | null;
   streamingMessageId?: string;
   onSendMessage: (text: string, files?: File[]) => void;
+  onMcpApproval?: (approvalRequestId: string, approved: boolean, previousResponseId: string, conversationId: string) => void;
   onClearError?: () => void;
   onOpenSettings?: () => void;
   onNewChat?: () => void;
@@ -27,10 +29,11 @@ interface ChatInterfaceProps {
   agentDescription?: string;
   agentLogo?: string;
   starterPrompts?: string[];
+  conversationId?: string | null;
 }
 
 export const ChatInterface: React.FC<ChatInterfaceProps> = (props) => {
-  const { messages, status, error, streamingMessageId, onSendMessage, onClearError, onOpenSettings, onNewChat, onCancelStream, hasMessages, disabled, agentName, agentDescription, agentLogo, starterPrompts } = props;
+  const { messages, status, error, streamingMessageId, onSendMessage, onMcpApproval, onClearError, onOpenSettings, onNewChat, onCancelStream, hasMessages, disabled, agentName, agentDescription, agentLogo, starterPrompts, conversationId } = props;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [liveRegionMessage, setLiveRegionMessage] = useState<string>('');
   
@@ -103,7 +106,29 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = (props) => {
                 }
               </div>
               {messages.map((message) =>
-                message.role === "user" ? (
+                message.role === "approval" ? (
+                  <McpApprovalCard
+                    key={message.id}
+                    toolName={message.mcpApproval?.toolName || ''}
+                    serverLabel={message.mcpApproval?.serverLabel || ''}
+                    arguments={message.mcpApproval?.arguments}
+                    onApprove={() => onMcpApproval?.(
+                      message.mcpApproval!.id,
+                      true,
+                      message.mcpApproval!.previousResponseId || '',
+                      conversationId || ''
+                    )}
+                    onReject={() => onMcpApproval?.(
+                      message.mcpApproval!.id,
+                      false,
+                      message.mcpApproval!.previousResponseId || '',
+                      conversationId || ''
+                    )}
+                    disabled={isBusy}
+                    agentName={agentName}
+                    agentLogo={agentLogo}
+                  />
+                ) : message.role === "user" ? (
                   <UserMessage key={message.id} message={message} />
                 ) : (
                   <AssistantMessage 

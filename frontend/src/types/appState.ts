@@ -1,9 +1,9 @@
 import type { AccountInfo } from '@azure/msal-browser';
-import type { IChatItem, IUsageInfo, IAnnotation } from './chat';
+import type { IChatItem, IUsageInfo, IAnnotation, IMcpApprovalRequest } from './chat';
 import type { AppError } from './errors';
 
 // Re-export types for convenience
-export type { IChatItem, IUsageInfo, IAnnotation };
+export type { IChatItem, IUsageInfo, IAnnotation, IMcpApprovalRequest };
 
 /**
  * Central application state structure
@@ -46,6 +46,7 @@ export type AppAction =
   | { type: 'CHAT_START_STREAM'; conversationId?: string; messageId: string }
   | { type: 'CHAT_STREAM_CHUNK'; messageId: string; content: string }
   | { type: 'CHAT_STREAM_ANNOTATIONS'; messageId: string; annotations: IAnnotation[] }
+  | { type: 'CHAT_MCP_APPROVAL_REQUEST'; messageId: string; approvalRequest: IMcpApprovalRequest; previousResponseId: string | null }
   | { type: 'CHAT_STREAM_COMPLETE'; usage: IUsageInfo }
   | { type: 'CHAT_CANCEL_STREAM' }
   | { type: 'CHAT_ERROR'; error: AppError } // Enhanced error object

@@ -267,20 +267,50 @@ Get-ChildItem -Path backend -Recurse -Include *.cs |
 
 **Use for**: Quick inventory of what exists. Follow up with pattern search or IDE navigation for understanding.
 
-### Reflection (Last Resort Only)
+### PowerShell Reflection for .NET Assemblies
 
-Only use when nothing else works and you must verify exact method signatures on a beta SDK:
+Use when you need to discover exact type members on any .NET assembly (especially beta SDKs):
 
 ```powershell
-cd backend/WebApp.Api; dotnet build
-$asm = [Reflection.Assembly]::LoadFrom((Resolve-Path "bin/Debug/net9.0/Azure.AI.Projects.dll"))
-$asm.GetType("Azure.AI.Projects.OpenAI.ProjectResponsesClient").GetMethods() | 
-    Where-Object { $_.Name -like "*Streaming*" } | Select-Object Name, ReturnType
+# 1. Build first to ensure DLLs are current
+cd backend/WebApp.Api; dotnet build --no-restore
+
+# 2. Find and load any assembly by name
+$dll = Get-ChildItem -Path "bin/Debug" -Recurse -Filter "SomePackage.dll" | Select-Object -First 1
+$asm = [System.Reflection.Assembly]::LoadFrom($dll.FullName)
+
+# 3. Inspect a specific type's properties
+$type = $asm.GetType("SomeNamespace.SomeClass")
+Write-Host "Type: $($type.FullName)"
+Write-Host "Assembly: $($asm.GetName().Name) v$($asm.GetName().Version)"
+$type.GetProperties() | ForEach-Object { Write-Host "  $($_.PropertyType.Name) $($_.Name)" }
+
+# 4. Check base type for inherited members
+Write-Host "Base: $($type.BaseType.Name)"
+$type.BaseType.GetProperties() | ForEach-Object { Write-Host "    $($_.PropertyType.Name) $($_.Name)" }
 ```
 
-**When to use**: Beta SDK docs are wrong/missing, IDE can't resolve the type, and GitHub source is unclear.
+**Finding types by pattern** (when you don't know exact namespace):
 
-**Limitation**: Returns raw API surface without intent, relationships, or usage guidance. Prefer contextual methods above.
+```powershell
+# Search for types matching a pattern
+$asm.GetTypes() | Where-Object { $_.Name -like "*Response*" } | ForEach-Object { Write-Host $_.FullName }
+
+# Find methods on a type
+$type.GetMethods() | Where-Object { $_.Name -like "*Async*" } | Select-Object Name, ReturnType
+```
+
+**Common assemblies to inspect** (after `dotnet build`):
+
+| Assembly | Path | Contains |
+|----------|------|----------|
+| `Azure.AI.Projects.dll` | bin/Debug/net9.0/ | AIProjectClient, AgentRecord, Conversations |
+| `OpenAI.dll` | bin/Debug/net9.0/ | ResponseItem, StreamingResponse*, annotations |
+| `Azure.Identity.dll` | bin/Debug/net9.0/ | Credential types |
+
+**When to use**: Beta SDK properties aren't in docs, IDE tooltips are incomplete, or you need to verify a type's actual API surface.
+
+**Limitation**: Returns raw API surface without intent or usage guidance. Combine with GitHub source for context.
 
 ## Related Skills
 

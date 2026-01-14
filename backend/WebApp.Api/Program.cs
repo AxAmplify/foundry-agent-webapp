@@ -170,6 +170,7 @@ app.MapGet("/api/health", (HttpContext context) =>
 .WithName("GetHealth");
 
 // Streaming Chat endpoint: Streams agent response via SSE (conversationId → chunks → usage → done)
+// Supports MCP tool approval flow with previousResponseId and mcpApproval parameters
 app.MapPost("/api/chat/stream", async (
     ChatRequest request,
     AgentFrameworkService agentService,
@@ -194,6 +195,9 @@ app.MapPost("/api/chat/stream", async (
             conversationId,
             request.Message,
             request.ImageDataUris,
+            request.FileDataUris,
+            request.PreviousResponseId,
+            request.McpApproval,
             cancellationToken))
         {
             if (chunk.IsText && chunk.TextDelta != null)
@@ -203,6 +207,10 @@ app.MapPost("/api/chat/stream", async (
             else if (chunk.HasAnnotations && chunk.Annotations != null)
             {
                 await WriteAnnotationsEvent(httpContext.Response, chunk.Annotations, cancellationToken);
+            }
+            else if (chunk.IsMcpApprovalRequest && chunk.McpApprovalRequest != null)
+            {
+                await WriteMcpApprovalRequestEvent(httpContext.Response, chunk.McpApprovalRequest, cancellationToken);
             }
         }
 
@@ -218,9 +226,9 @@ app.MapPost("/api/chat/stream", async (
 
         await WriteDoneEvent(httpContext.Response, cancellationToken);
     }
-    catch (ArgumentException ex) when (ex.Message.Contains("Invalid image attachments"))
+    catch (ArgumentException ex) when (ex.Message.Contains("Invalid") && (ex.Message.Contains("attachments") || ex.Message.Contains("image") || ex.Message.Contains("file")))
     {
-        // Validation errors from image processing - return 400 Bad Request
+        // Validation errors from image/file processing - return 400 Bad Request
         var errorResponse = ErrorResponseFactory.CreateFromException(
             ex, 
             400, 
@@ -278,6 +286,23 @@ static async Task WriteAnnotationsEvent(HttpResponse response, List<WebApp.Api.M
             endIndex = a.EndIndex,
             quote = a.Quote
         })
+    });
+    await response.WriteAsync($"data: {json}\n\n", ct);
+    await response.Body.FlushAsync(ct);
+}
+
+static async Task WriteMcpApprovalRequestEvent(HttpResponse response, WebApp.Api.Models.McpApprovalRequest approval, CancellationToken ct)
+{
+    var json = System.Text.Json.JsonSerializer.Serialize(new
+    {
+        type = "mcpApprovalRequest",
+        approvalRequest = new
+        {
+            id = approval.Id,
+            toolName = approval.ToolName,
+            serverLabel = approval.ServerLabel,
+            arguments = approval.Arguments
+        }
     });
     await response.WriteAsync($"data: {json}\n\n", ct);
     await response.Body.FlushAsync(ct);

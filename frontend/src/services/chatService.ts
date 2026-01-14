@@ -72,11 +72,11 @@ export class ChatService {
 
   /**
    * Prepare message payload with optional file attachments.
-   * Converts files to data URIs and creates attachment metadata.
+   * Converts files to data URIs and separates images from documents.
    * 
    * @param text - Message text content
-   * @param files - Optional array of image files
-   * @returns Payload with content, data URIs, and attachment metadata
+   * @param files - Optional array of files (images and documents)
+   * @returns Payload with content, image URIs, file attachments, and attachment metadata
    */
   private async prepareMessagePayload(
     text: string,
@@ -84,15 +84,29 @@ export class ChatService {
   ): Promise<{
     content: string;
     imageDataUris: string[];
+    fileDataUris: Array<{ dataUri: string; fileName: string; mimeType: string }>;
     attachments: IChatItem['attachments'];
   }> {
     let imageDataUris: string[] = [];
+    let fileDataUris: Array<{ dataUri: string; fileName: string; mimeType: string }> = [];
     let attachments: IChatItem['attachments'] = undefined;
 
     if (files && files.length > 0) {
       try {
         const results = await convertFilesToDataUris(files);
-        imageDataUris = results.map((r) => r.dataUri);
+        
+        // Separate images from documents
+        const imageResults = results.filter((r) => r.mimeType.startsWith('image/'));
+        const fileResults = results.filter((r) => !r.mimeType.startsWith('image/'));
+        
+        imageDataUris = imageResults.map((r) => r.dataUri);
+        fileDataUris = fileResults.map((r) => ({
+          dataUri: r.dataUri,
+          fileName: r.name,
+          mimeType: r.mimeType,
+        }));
+        
+        // Create attachment metadata for UI display
         attachments = createAttachmentMetadata(results);
       } catch (error) {
         const appError = createAppError(error);
@@ -101,7 +115,7 @@ export class ChatService {
       }
     }
 
-    return { content: text, imageDataUris, attachments };
+    return { content: text, imageDataUris, fileDataUris, attachments };
   }
 
   /**
@@ -110,17 +124,20 @@ export class ChatService {
    * @param message - User message text
    * @param conversationId - Current conversation ID (null for new conversations)
    * @param imageDataUris - Array of base64 data URIs for images
+   * @param fileDataUris - Array of file attachments with metadata
    * @returns Request body object
    */
   private constructRequestBody(
     message: string,
     conversationId: string | null,
-    imageDataUris: string[]
+    imageDataUris: string[],
+    fileDataUris: Array<{ dataUri: string; fileName: string; mimeType: string }>
   ): Record<string, any> {
     return {
       message,
       conversationId,
       imageDataUris: imageDataUris.length > 0 ? imageDataUris : undefined,
+      fileDataUris: fileDataUris.length > 0 ? fileDataUris : undefined,
     };
   }
 
@@ -166,7 +183,7 @@ export class ChatService {
    * 
    * @param messageText - The user's message text
    * @param currentConversationId - Current conversation ID (null for new conversations)
-   * @param files - Optional array of image files to attach
+   * @param files - Optional array of files to attach (images and documents)
    * @throws {Error} If authentication fails or API request fails
    * 
    * @remarks
@@ -186,7 +203,7 @@ export class ChatService {
 
     try {
       const token = await this.ensureAuthToken();
-      const { content, imageDataUris, attachments } = await this.prepareMessagePayload(
+      const { content, imageDataUris, fileDataUris, attachments } = await this.prepareMessagePayload(
         messageText,
         files
       );
@@ -217,7 +234,8 @@ export class ChatService {
       const requestBody = this.constructRequestBody(
         messageText,
         currentConversationId,
-        imageDataUris
+        imageDataUris,
+        fileDataUris
       );
 
       const response = await retryWithBackoff(
@@ -349,6 +367,17 @@ export class ChatService {
               }
               break;
 
+            case 'mcpApprovalRequest':
+              if (event.data.approvalRequest) {
+                this.dispatch({
+                  type: 'CHAT_MCP_APPROVAL_REQUEST',
+                  messageId,
+                  approvalRequest: event.data.approvalRequest,
+                  previousResponseId: newConversationId,
+                });
+              }
+              break;
+
             case 'usage':
               this.dispatch({
                 type: 'CHAT_STREAM_COMPLETE',
@@ -397,6 +426,73 @@ export class ChatService {
       } catch {
         // Reader may already be released
       }
+    }
+  }
+
+  /**
+   * Send approval response for an MCP tool call.
+   * 
+   * @param approvalRequestId - ID of the approval request
+   * @param approved - Whether the tool call was approved
+   * @param previousResponseId - Response ID to continue from
+   * @param conversationId - Current conversation ID
+   */
+  async sendMcpApproval(
+    approvalRequestId: string,
+    approved: boolean,
+    previousResponseId: string,
+    conversationId: string
+  ): Promise<void> {
+    try {
+      const token = await this.ensureAuthToken();
+
+      const assistantMessageId = Date.now().toString();
+      this.dispatch({ type: 'CHAT_ADD_ASSISTANT_MESSAGE', messageId: assistantMessageId });
+      this.dispatch({
+        type: 'CHAT_START_STREAM',
+        conversationId,
+        messageId: assistantMessageId,
+      });
+
+      this.currentStreamAbort = new AbortController();
+      this.streamCancelled = false;
+
+      const requestBody = {
+        message: approved ? 'Approved' : 'Rejected',
+        conversationId,
+        previousResponseId,
+        mcpApproval: {
+          approvalRequestId,
+          approved,
+        },
+      };
+
+      const response = await retryWithBackoff(
+        async () =>
+          this.initiateStream(
+            `${this.apiUrl}/chat/stream`,
+            token,
+            requestBody,
+            this.currentStreamAbort!.signal
+          ),
+        3,
+        1000
+      );
+
+      await this.processStream(response, assistantMessageId, conversationId);
+      this.currentStreamAbort = undefined;
+      this.streamCancelled = false;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+
+      const appError: AppError = isAppError(error)
+        ? error
+        : createAppError(error, getErrorCodeFromMessage(error));
+
+      this.dispatch({ type: 'CHAT_ERROR', error: appError });
+      throw error;
     }
   }
 

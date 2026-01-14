@@ -44,6 +44,15 @@ export const AgentPreview: React.FC<AgentPreviewProps> = ({ agentId: _agentId, a
     chatService.cancelStream();
   };
 
+  const handleMcpApproval = async (
+    approvalRequestId: string,
+    approved: boolean,
+    previousResponseId: string,
+    conversationId: string
+  ) => {
+    await chatService.sendMcpApproval(approvalRequestId, approved, previousResponseId, conversationId);
+  };
+
   return (
     <div className={styles.content}>
       <div className={styles.mainContent}>
@@ -57,6 +66,8 @@ export const AgentPreview: React.FC<AgentPreviewProps> = ({ agentId: _agentId, a
           onOpenSettings={() => setIsSettingsOpen(true)}
           onNewChat={handleNewChat}
           onCancelStream={handleCancelStream}
+          onMcpApproval={handleMcpApproval}
+          conversationId={chat.currentConversationId}
           hasMessages={chat.messages.length > 0}
           disabled={false}
           agentName={agentName}

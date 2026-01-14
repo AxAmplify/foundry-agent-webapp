@@ -119,29 +119,25 @@ public class AgentFrameworkService : IDisposable
 
     /// <summary>
     /// Streams agent response for a message using ProjectResponsesClient (Responses API).
-    /// Returns StreamChunk objects containing either text deltas or annotations.
+    /// Returns StreamChunk objects containing text deltas, annotations, or MCP approval requests.
     /// </summary>
     public async IAsyncEnumerable<StreamChunk> StreamMessageAsync(
         string conversationId,
         string message,
         List<string>? imageDataUris = null,
+        List<FileAttachment>? fileDataUris = null,
+        string? previousResponseId = null,
+        McpApprovalResponse? mcpApproval = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         _logger.LogInformation(
-            "Streaming message to conversation: {ConversationId}, ImageCount: {ImageCount}",
+            "Streaming message to conversation: {ConversationId}, ImageCount: {ImageCount}, FileCount: {FileCount}, HasApproval: {HasApproval}",
             conversationId,
-            imageDataUris?.Count ?? 0);
-
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            _logger.LogWarning("Attempted to stream empty message to conversation {ConversationId}", conversationId);
-            throw new ArgumentException("Message cannot be null or whitespace", nameof(message));
-        }
-
-        // Build user message with optional images
-        ResponseItem userMessage = BuildUserMessage(message, imageDataUris);
+            imageDataUris?.Count ?? 0,
+            fileDataUris?.Count ?? 0,
+            mcpApproval != null);
 
         // Get ProjectResponsesClient for the agent and conversation
         ProjectResponsesClient responsesClient
@@ -149,11 +145,33 @@ public class AgentFrameworkService : IDisposable
                 new AgentReference(_agentId), 
                 conversationId);
 
-        CreateResponseOptions options = new()
+        CreateResponseOptions options = new() { StreamingEnabled = true };
+
+        // If continuing from MCP approval, link to previous response
+        if (!string.IsNullOrEmpty(previousResponseId) && mcpApproval != null)
         {
-            InputItems = { userMessage },
-            StreamingEnabled = true
-        };
+            options.PreviousResponseId = previousResponseId;
+            options.InputItems.Add(ResponseItem.CreateMcpApprovalResponseItem(
+                mcpApproval.ApprovalRequestId,
+                mcpApproval.Approved));
+            
+            _logger.LogInformation(
+                "Resuming with MCP approval: RequestId={RequestId}, Approved={Approved}",
+                mcpApproval.ApprovalRequestId,
+                mcpApproval.Approved);
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                _logger.LogWarning("Attempted to stream empty message to conversation {ConversationId}", conversationId);
+                throw new ArgumentException("Message cannot be null or whitespace", nameof(message));
+            }
+
+            // Build user message with optional images and files
+            ResponseItem userMessage = BuildUserMessage(message, imageDataUris, fileDataUris);
+            options.InputItems.Add(userMessage);
+        }
 
         // Dictionary to collect file search results for quote extraction
         var fileSearchQuotes = new Dictionary<string, string>();
@@ -169,6 +187,28 @@ public class AgentFrameworkService : IDisposable
             }
             else if (update is StreamingResponseOutputItemDoneUpdate itemDoneUpdate)
             {
+                // Check for MCP tool approval request
+                if (itemDoneUpdate.Item is McpToolCallApprovalRequestItem mcpApprovalItem)
+                {
+                    _logger.LogInformation(
+                        "MCP tool approval requested: Id={Id}, Tool={Tool}, Server={Server}",
+                        mcpApprovalItem.Id,
+                        mcpApprovalItem.ToolName,
+                        mcpApprovalItem.ServerLabel);
+                    
+                    // Parse tool arguments from BinaryData to string (JSON)
+                    string? argumentsJson = mcpApprovalItem.ToolArguments?.ToString();
+                    
+                    yield return StreamChunk.McpApproval(new McpApprovalRequest
+                    {
+                        Id = mcpApprovalItem.Id,
+                        ToolName = mcpApprovalItem.ToolName ?? "Unknown tool",
+                        ServerLabel = mcpApprovalItem.ServerLabel ?? "MCP Server",
+                        Arguments = argumentsJson
+                    });
+                    continue;
+                }
+                
                 // Capture file search results for quote extraction
                 if (itemDoneUpdate.Item is FileSearchCallResponseItem fileSearchItem)
                 {
@@ -211,8 +251,47 @@ public class AgentFrameworkService : IDisposable
     /// <summary>
     /// Supported image MIME types for vision capabilities.
     /// </summary>
-    private static readonly HashSet<string> AllowedMediaTypes = 
+    private static readonly HashSet<string> AllowedImageTypes = 
         ["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"];
+
+    /// <summary>
+    /// Supported document MIME types for file input.
+    /// Note: Office documents (docx, pptx, xlsx) are NOT supported - they cannot be parsed.
+    /// </summary>
+    private static readonly HashSet<string> AllowedDocumentTypes = 
+        [
+            "application/pdf",
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/json",
+            "text/html",
+            "application/xml",
+            "text/xml"
+        ];
+
+    /// <summary>
+    /// Text-based document MIME types that should be inlined as text rather than sent as file input.
+    /// The Responses API only supports PDF for CreateInputFilePart.
+    /// </summary>
+    private static readonly HashSet<string> TextBasedDocumentTypes = 
+        [
+            "text/plain",
+            "text/markdown",
+            "text/csv",
+            "application/json",
+            "text/html",
+            "application/xml",
+            "text/xml"
+        ];
+
+    /// <summary>
+    /// MIME types that can be sent as file input (only PDF is currently supported by Responses API).
+    /// </summary>
+    private static readonly HashSet<string> FileInputTypes = 
+        [
+            "application/pdf"
+        ];
 
     /// <summary>
     /// Maximum number of images per message.
@@ -220,26 +299,33 @@ public class AgentFrameworkService : IDisposable
     private const int MaxImageCount = 5;
 
     /// <summary>
+    /// Maximum number of files per message.
+    /// </summary>
+    private const int MaxFileCount = 10;
+
+    /// <summary>
     /// Maximum size per image in bytes (5MB).
     /// </summary>
     private const long MaxImageSizeBytes = 5 * 1024 * 1024;
 
     /// <summary>
-    /// Builds a ResponseItem for the user message with optional image attachments.
-    /// Validates count (max 5), size (max 5MB each), MIME type, and Base64 format.
+    /// Maximum size per document file in bytes (20MB).
     /// </summary>
-    private static ResponseItem BuildUserMessage(string message, List<string>? imageDataUris)
+    private const long MaxFileSizeBytes = 20 * 1024 * 1024;
+
+    /// <summary>
+    /// Builds a ResponseItem for the user message with optional image and file attachments.
+    /// Validates count, size, MIME type, and Base64 format for both images and documents.
+    /// </summary>
+    private static ResponseItem BuildUserMessage(
+        string message, 
+        List<string>? imageDataUris,
+        List<FileAttachment>? fileDataUris = null)
     {
-        if (imageDataUris == null || imageDataUris.Count == 0)
+        if ((imageDataUris == null || imageDataUris.Count == 0) && 
+            (fileDataUris == null || fileDataUris.Count == 0))
         {
             return ResponseItem.CreateUserMessageItem(message);
-        }
-
-        // Enforce maximum image count
-        if (imageDataUris.Count > MaxImageCount)
-        {
-            throw new ArgumentException(
-                $"Invalid image attachments: Too many images ({imageDataUris.Count}), maximum {MaxImageCount} allowed");
         }
 
         var contentParts = new List<ResponseContentPart>
@@ -249,61 +335,157 @@ public class AgentFrameworkService : IDisposable
 
         var errors = new List<string>();
 
-        for (int i = 0; i < imageDataUris.Count; i++)
+        // Process images
+        if (imageDataUris != null && imageDataUris.Count > 0)
         {
-            var dataUri = imageDataUris[i];
-            
-            // Validate data URI format
-            if (!dataUri.StartsWith("data:"))
+            // Enforce maximum image count
+            if (imageDataUris.Count > MaxImageCount)
             {
-                errors.Add($"Image {i + 1}: Invalid format (must be data URI)");
-                continue;
+                throw new ArgumentException(
+                    $"Invalid image attachments: Too many images ({imageDataUris.Count}), maximum {MaxImageCount} allowed");
             }
 
-            var semiIndex = dataUri.IndexOf(';');
-            var commaIndex = dataUri.IndexOf(',');
-            
-            if (semiIndex < 0 || commaIndex < 0 || commaIndex < semiIndex)
+            for (int i = 0; i < imageDataUris.Count; i++)
             {
-                errors.Add($"Image {i + 1}: Malformed data URI");
-                continue;
-            }
-
-            // Extract and validate MIME type
-            var mediaType = dataUri[5..semiIndex].ToLowerInvariant();
-            if (!AllowedMediaTypes.Contains(mediaType))
-            {
-                errors.Add($"Image {i + 1}: Unsupported type '{mediaType}'. Allowed: PNG, JPEG, GIF, WebP");
-                continue;
-            }
-
-            // Validate Base64 and decode
-            var base64Data = dataUri[(commaIndex + 1)..];
-            try
-            {
-                var bytes = Convert.FromBase64String(base64Data);
+                var dataUri = imageDataUris[i];
                 
-                // Enforce size limit
-                if (bytes.Length > MaxImageSizeBytes)
+                // Validate data URI format
+                if (!dataUri.StartsWith("data:"))
                 {
-                    var sizeMB = bytes.Length / (1024.0 * 1024.0);
-                    errors.Add($"Image {i + 1}: Size {sizeMB:F1}MB exceeds maximum 5MB");
+                    errors.Add($"Image {i + 1}: Invalid format (must be data URI)");
                     continue;
                 }
+
+                var semiIndex = dataUri.IndexOf(';');
+                var commaIndex = dataUri.IndexOf(',');
                 
-                contentParts.Add(ResponseContentPart.CreateInputImagePart(
-                    BinaryData.FromBytes(bytes),
-                    mediaType));
+                if (semiIndex < 0 || commaIndex < 0 || commaIndex < semiIndex)
+                {
+                    errors.Add($"Image {i + 1}: Malformed data URI");
+                    continue;
+                }
+
+                // Extract and validate MIME type
+                var mediaType = dataUri[5..semiIndex].ToLowerInvariant();
+                if (!AllowedImageTypes.Contains(mediaType))
+                {
+                    errors.Add($"Image {i + 1}: Unsupported type '{mediaType}'. Allowed: PNG, JPEG, GIF, WebP");
+                    continue;
+                }
+
+                // Validate Base64 and decode
+                var base64Data = dataUri[(commaIndex + 1)..];
+                try
+                {
+                    var bytes = Convert.FromBase64String(base64Data);
+                    
+                    // Enforce size limit
+                    if (bytes.Length > MaxImageSizeBytes)
+                    {
+                        var sizeMB = bytes.Length / (1024.0 * 1024.0);
+                        errors.Add($"Image {i + 1}: Size {sizeMB:F1}MB exceeds maximum 5MB");
+                        continue;
+                    }
+                    
+                    contentParts.Add(ResponseContentPart.CreateInputImagePart(
+                        BinaryData.FromBytes(bytes),
+                        mediaType));
+                }
+                catch (FormatException)
+                {
+                    errors.Add($"Image {i + 1}: Invalid Base64 encoding");
+                }
             }
-            catch (FormatException)
+        }
+
+        // Process file attachments
+        if (fileDataUris != null && fileDataUris.Count > 0)
+        {
+            // Enforce maximum file count
+            if (fileDataUris.Count > MaxFileCount)
             {
-                errors.Add($"Image {i + 1}: Invalid Base64 encoding");
+                throw new ArgumentException(
+                    $"Invalid file attachments: Too many files ({fileDataUris.Count}), maximum {MaxFileCount} allowed");
+            }
+
+            for (int i = 0; i < fileDataUris.Count; i++)
+            {
+                var file = fileDataUris[i];
+                var dataUri = file.DataUri;
+                
+                // Validate data URI format
+                if (!dataUri.StartsWith("data:"))
+                {
+                    errors.Add($"File {i + 1} ({file.FileName}): Invalid format (must be data URI)");
+                    continue;
+                }
+
+                var semiIndex = dataUri.IndexOf(';');
+                var commaIndex = dataUri.IndexOf(',');
+                
+                if (semiIndex < 0 || commaIndex < 0 || commaIndex < semiIndex)
+                {
+                    errors.Add($"File {i + 1} ({file.FileName}): Malformed data URI");
+                    continue;
+                }
+
+                // Extract and validate MIME type
+                var mediaType = dataUri[5..semiIndex].ToLowerInvariant();
+                if (!AllowedDocumentTypes.Contains(mediaType))
+                {
+                    errors.Add($"File {i + 1} ({file.FileName}): Unsupported type '{mediaType}'");
+                    continue;
+                }
+
+                // Verify MIME type matches what was declared
+                if (!string.Equals(mediaType, file.MimeType.ToLowerInvariant(), StringComparison.OrdinalIgnoreCase))
+                {
+                    errors.Add($"File {i + 1} ({file.FileName}): MIME type mismatch (declared: {file.MimeType}, detected: {mediaType})");
+                    continue;
+                }
+
+                // Validate Base64 and decode
+                var base64Data = dataUri[(commaIndex + 1)..];
+                try
+                {
+                    var bytes = Convert.FromBase64String(base64Data);
+                    
+                    // Enforce size limit
+                    if (bytes.Length > MaxFileSizeBytes)
+                    {
+                        var sizeMB = bytes.Length / (1024.0 * 1024.0);
+                        errors.Add($"File {i + 1} ({file.FileName}): Size {sizeMB:F1}MB exceeds maximum 20MB");
+                        continue;
+                    }
+                    
+                    // Handle text-based files by inlining their content
+                    // The Responses API only supports PDF for CreateInputFilePart
+                    if (TextBasedDocumentTypes.Contains(mediaType))
+                    {
+                        // Decode text content and add as inline text with filename context
+                        var textContent = System.Text.Encoding.UTF8.GetString(bytes);
+                        var inlineText = $"\n\n--- Content of {file.FileName} ---\n{textContent}\n--- End of {file.FileName} ---\n";
+                        contentParts.Add(ResponseContentPart.CreateInputTextPart(inlineText));
+                    }
+                    else if (FileInputTypes.Contains(mediaType))
+                    {
+                        // PDF files can be sent as file input
+                        contentParts.Add(ResponseContentPart.CreateInputFilePart(
+                            BinaryData.FromBytes(bytes),
+                            mediaType,
+                            file.FileName));
+                    }
+                }
+                catch (FormatException)
+                {
+                    errors.Add($"File {i + 1} ({file.FileName}): Invalid Base64 encoding");
+                }
             }
         }
 
         if (errors.Count > 0)
         {
-            throw new ArgumentException($"Invalid image attachments: {string.Join("; ", errors)}");
+            throw new ArgumentException($"Invalid attachments: {string.Join("; ", errors)}");
         }
 
         return ResponseItem.CreateUserMessageItem(contentParts);
@@ -341,11 +523,11 @@ public class AgentFrameworkService : IDisposable
                     FileCitationMessageAnnotation fileCitation => new AnnotationInfo
                     {
                         Type = "file_citation",
-                        Label = fileCitation.Filename ?? "File",
+                        Label = fileCitation.Filename ?? fileCitation.FileId ?? "File",
                         FileId = fileCitation.FileId,
                         StartIndex = fileCitation.Index,
                         EndIndex = fileCitation.Index,
-                        Quote = fileSearchQuotes?.TryGetValue(fileCitation.FileId, out var quote) == true 
+                        Quote = fileSearchQuotes?.TryGetValue(fileCitation.FileId ?? string.Empty, out var quote) == true 
                             ? quote : null
                     },
                     
