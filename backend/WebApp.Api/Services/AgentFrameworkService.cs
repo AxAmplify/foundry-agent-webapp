@@ -2,6 +2,8 @@ using Azure.AI.Projects;
 using Azure.AI.Projects.OpenAI;
 using Azure.Core;
 using Azure.Identity;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.AI;
 using OpenAI.Responses;
 using System.Runtime.CompilerServices;
 using WebApp.Api.Models;
@@ -11,10 +13,11 @@ namespace WebApp.Api.Services;
 #pragma warning disable OPENAI001
 
 /// <summary>
-/// Azure AI Foundry agent service using v2 Agents API via Azure.AI.Projects SDK.
+/// Azure AI Foundry agent service using v2 Agents API.
 /// </summary>
 /// <remarks>
-/// Uses AIProjectClient.Agents (not PersistentAgentsClient) for human-readable agent IDs.
+/// Uses Microsoft.Agents.AI.AzureAI extension methods on AIProjectClient for agent loading,
+/// and direct ProjectResponsesClient for streaming (required for annotations, MCP approvals).
 /// See .github/skills/researching-azure-ai-sdk/SKILL.md for SDK patterns.
 /// </remarks>
 public class AgentFrameworkService : IDisposable
@@ -22,7 +25,7 @@ public class AgentFrameworkService : IDisposable
     private readonly AIProjectClient _projectClient;
     private readonly string _agentId;
     private readonly ILogger<AgentFrameworkService> _logger;
-    private AgentVersion? _cachedAgentVersion;
+    private ChatClientAgent? _cachedAgent;
     private AgentMetadataResponse? _cachedMetadata;
     private readonly SemaphoreSlim _agentLock = new(1, 1);
     private bool _disposed = false;
@@ -67,34 +70,38 @@ public class AgentFrameworkService : IDisposable
     }
 
     /// <summary>
-    /// Get agent metadata from Azure AI Foundry v2 Agents API.
-    /// Caches the result for subsequent calls.
+    /// Get agent via Microsoft Agent Framework extension methods.
+    /// Uses AIProjectClient.GetAIAgentAsync() which wraps v2 Agents API.
     /// </summary>
-    private async Task<AgentVersion> GetAgentAsync(CancellationToken cancellationToken = default)
+    private async Task<ChatClientAgent> GetAgentAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_cachedAgentVersion != null)
-            return _cachedAgentVersion;
+        if (_cachedAgent != null)
+            return _cachedAgent;
 
         await _agentLock.WaitAsync(cancellationToken);
         try
         {
-            if (_cachedAgentVersion != null)
-                return _cachedAgentVersion;
+            if (_cachedAgent != null)
+                return _cachedAgent;
 
-            _logger.LogInformation("Loading agent from v2 Agents API: {AgentId}", _agentId);
+            _logger.LogInformation("Loading agent via Agent Framework: {AgentId}", _agentId);
 
-            // Use AIProjectClient.Agents to access v2 Agents API (/agents/ endpoint)
-            AgentRecord agentRecord = await _projectClient.Agents.GetAgentAsync(_agentId, cancellationToken);
-            _cachedAgentVersion = agentRecord.Versions.Latest;
+            // Use Microsoft.Agents.AI.AzureAI extension method - handles v2 Agents API internally
+            _cachedAgent = await _projectClient.GetAIAgentAsync(
+                name: _agentId,
+                cancellationToken: cancellationToken);
 
-            var definition = _cachedAgentVersion.Definition as PromptAgentDefinition;
+            // Get the AgentVersion from the cached agent for metadata
+            var agentVersion = _cachedAgent.GetService<AgentVersion>();
+            var definition = agentVersion?.Definition as PromptAgentDefinition;
+            
             _logger.LogInformation(
                 "Loaded agent: name={AgentName}, model={Model}, version={Version}", 
-                _cachedAgentVersion.Name,
+                agentVersion?.Name ?? _agentId,
                 definition?.Model ?? "unknown",
-                _cachedAgentVersion.Version);
+                agentVersion?.Version ?? "latest");
 
             // Log StructuredInputs at debug level for troubleshooting
             if (definition?.StructuredInputs != null && definition.StructuredInputs.Count > 0)
@@ -104,7 +111,7 @@ public class AgentFrameworkService : IDisposable
                     string.Join(", ", definition.StructuredInputs.Keys));
             }
 
-            return _cachedAgentVersion;
+            return _cachedAgent;
         }
         catch (Exception ex)
         {
@@ -121,6 +128,13 @@ public class AgentFrameworkService : IDisposable
     /// Streams agent response for a message using ProjectResponsesClient (Responses API).
     /// Returns StreamChunk objects containing text deltas, annotations, or MCP approval requests.
     /// </summary>
+    /// <remarks>
+    /// Uses direct ProjectResponsesClient instead of IChatClient because we need access to:
+    /// - McpToolCallApprovalRequestItem for MCP approval flows
+    /// - FileSearchCallResponseItem for file search quotes  
+    /// - MessageResponseItem.OutputTextAnnotations for citations
+    /// The IChatClient abstraction doesn't expose these specialized response types.
+    /// </remarks>
     public async IAsyncEnumerable<StreamChunk> StreamMessageAsync(
         string conversationId,
         string message,
@@ -609,22 +623,25 @@ public class AgentFrameworkService : IDisposable
 
     /// <summary>
     /// Get the agent metadata (name, description, etc.) for display in UI.
+    /// Uses Agent Framework's ChatClientAgent which provides access to AgentVersion.
     /// </summary>
     public async Task<AgentMetadataResponse> GetAgentMetadataAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Ensure agent is loaded (which also caches the version info)
-        await GetAgentAsync(cancellationToken);
+        // Ensure agent is loaded via Agent Framework
+        var agent = await GetAgentAsync(cancellationToken);
 
         if (_cachedMetadata != null)
             return _cachedMetadata;
 
-        if (_cachedAgentVersion == null)
-            throw new InvalidOperationException("Agent version not loaded");
+        // Get AgentVersion from the ChatClientAgent's services
+        var agentVersion = agent.GetService<AgentVersion>();
+        if (agentVersion == null)
+            throw new InvalidOperationException("Agent version not available from ChatClientAgent");
 
-        var definition = _cachedAgentVersion.Definition as PromptAgentDefinition;
-        var metadata = _cachedAgentVersion.Metadata?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+        var definition = agentVersion.Definition as PromptAgentDefinition;
+        var metadata = agentVersion.Metadata?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 
         // Log metadata keys at debug level for troubleshooting
         if (metadata != null && metadata.Count > 0)
@@ -639,9 +656,9 @@ public class AgentFrameworkService : IDisposable
         {
             Id = _agentId,
             Object = "agent",
-            CreatedAt = _cachedAgentVersion.CreatedAt.ToUnixTimeSeconds(),
-            Name = _cachedAgentVersion.Name ?? "AI Assistant",
-            Description = _cachedAgentVersion.Description,
+            CreatedAt = agentVersion.CreatedAt.ToUnixTimeSeconds(),
+            Name = agentVersion.Name ?? "AI Assistant",
+            Description = agentVersion.Description,
             Model = definition?.Model ?? string.Empty,
             Instructions = definition?.Instructions ?? string.Empty,
             Metadata = metadata,
@@ -691,8 +708,9 @@ public class AgentFrameworkService : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        await GetAgentAsync(cancellationToken);
-        return _cachedAgentVersion?.Name ?? _agentId;
+        var agent = await GetAgentAsync(cancellationToken);
+        var agentVersion = agent.GetService<AgentVersion>();
+        return agentVersion?.Name ?? _agentId;
     }
 
     /// <summary>

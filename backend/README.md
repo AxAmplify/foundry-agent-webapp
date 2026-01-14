@@ -109,10 +109,11 @@ dotnet list package --vulnerable
 | Package | Version | Purpose |
 |---------|---------|---------|
 | Azure.AI.Projects | 1.2.0-beta.5 | AI Foundry v2 Agents API SDK |
+| Microsoft.Agents.AI.AzureAI | 1.0.0-preview.260108.1 | Agent Framework (simplified agent loading) |
 | Azure.Identity | 1.17.1 | ManagedIdentityCredential for Azure auth |
 | Microsoft.Identity.Web | 4.3.0 | JWT Bearer authentication |
 
-**SDK Note**: Uses v2 Agents API (`/agents/` endpoint) with human-readable agent IDs. See `.github/skills/researching-azure-ai-sdk/SKILL.md` for SDK patterns.
+**SDK Note**: Uses v2 Agents API with human-readable agent IDs. Hybrid approach: Agent Framework for loading/metadata, direct SDK for streaming (required for MCP/annotations). See `.github/skills/researching-azure-ai-sdk/SKILL.md` for SDK patterns.
 
 ## Security
 

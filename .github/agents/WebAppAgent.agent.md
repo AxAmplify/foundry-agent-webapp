@@ -34,7 +34,7 @@ You are an expert agent for the **foundry-agent-webapp** project — an AI-power
 | **Frontend** | React 19 + TypeScript + Vite | 5173 | `App.tsx`, `AgentPreview.tsx`, `ChatInterface.tsx` |
 | **Backend** | ASP.NET Core 9 Minimal APIs | 8080 | `Program.cs`, `AgentFrameworkService.cs` |
 | **Auth** | Entra ID (MSAL.js PKCE → JWT Bearer) | — | `authConfig.ts`, `useAuth.ts` |
-| **AI** | Azure AI Foundry v2 Agents API | — | `Azure.AI.Projects` SDK v1.2.0-beta.5 |
+| **AI** | Azure AI Foundry v2 Agents API | — | `Azure.AI.Projects` + `Microsoft.Agents.AI.AzureAI` (hybrid) |
 | **Deploy** | Azure Container Apps (single container) | — | `main.bicep`, azd hooks |
 
 **Single Container Pattern**: Backend serves both API (`/api/*`) and React SPA from `wwwroot`.

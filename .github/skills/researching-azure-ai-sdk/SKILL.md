@@ -199,7 +199,7 @@ Use GitHub search to find usage examples:
 - `Azure.AI.Projects.OpenAI` - Responses API, conversations
 - `OpenAI.Responses` - Streaming types
 
-**Removed Package**: `Microsoft.Agents.AI.AzureAI` was evaluated but removed because it only supports OpenAI Assistants API, not v2 Agents API.
+**Available Package**: `Microsoft.Agents.AI.AzureAI` v1.0.0-preview.260108.1+ now supports v2 Agents API via `AIProjectClient` extension methods. See "Microsoft Agent Framework" section below for evaluation notes.
 
 **Key Resources**:
 - NuGet (Azure.AI.Projects): https://www.nuget.org/packages/Azure.AI.Projects
@@ -241,19 +241,91 @@ await foreach (var update in responsesClient.CreateResponseStreamingAsync(...))
 }
 ```
 
-## Microsoft Agent Framework (Not Used)
+## Microsoft Agent Framework (Used — Hybrid Approach)
 
-**Package**: `Microsoft.Agents.AI.AzureAI` v1.0.0-preview
+**Package**: `Microsoft.Agents.AI.AzureAI` v1.0.0-preview.260108.1
 
-**Status**: This project previously evaluated the Agent Framework but does not use it because `PersistentAgentsClient.GetAIAgentAsync()` only works with OpenAI Assistants API, not the v2 Agents API that Azure AI Foundry uses for human-readable agent IDs.
+**Status**: ✅ **Installed and active**. As of January 2026, Agent Framework supports v2 Agents API via `AIProjectClient` extension methods.
 
-**When to reconsider**:
-- When Microsoft adds native support for v2 Agents API in `PersistentAgentsClient`
-- Or a new `ProjectAgentsClient` that wraps `AIProjectClient.Agents`
+### Current Usage Pattern
+
+This project uses a **hybrid approach**:
+- **Agent Framework** for simplified agent loading and metadata
+- **Direct SDK** for streaming (required for specialized response types)
+
+```csharp
+// ✅ Agent loading via Agent Framework (simple)
+ChatClientAgent agent = await aiProjectClient.GetAIAgentAsync(
+    name: "dadjokes",           // Human-readable agent name
+    cancellationToken: ct);
+
+// Access AgentVersion for metadata
+AgentVersion? version = agent.GetService<AgentVersion>();
+var definition = version?.Definition as PromptAgentDefinition;
+
+// ❌ Direct SDK for streaming (Agent Framework can't do this yet)
+ProjectResponsesClient responsesClient = projectClient.OpenAI.GetProjectResponsesClientForAgent(
+    new AgentReference(_agentId), conversationId);
+await foreach (var update in responsesClient.CreateResponseStreamingAsync(...)) { }
+```
+
+### Why Not Full Agent Framework for Streaming?
+
+`ChatClientAgent.RunStreamingAsync()` returns `IAsyncEnumerable<AgentRunResponseUpdate>`, which provides:
+- `Text` — text content (✅ works)
+- `RawRepresentation` — underlying SDK object (can cast at runtime)
+
+**The problem**: The `IChatClient` abstraction doesn't directly expose:
+- `McpToolCallApprovalRequestItem` for MCP approval flows
+- `FileSearchCallResponseItem` for file search quotes
+- `MessageResponseItem.OutputTextAnnotations` for citations
+
+**Workaround exists but adds complexity**: Cast `RawRepresentation` to underlying types:
+```csharp
+await foreach (var update in agent.RunStreamingAsync(message, thread))
+{
+    if (update.RawRepresentation is StreamingResponseOutputItemDoneUpdate itemDone)
+    {
+        if (itemDone.Item is McpToolCallApprovalRequestItem mcpApproval)
+        {
+            // Handle MCP approval...
+        }
+    }
+}
+```
+
+**Why we use direct SDK instead**: 
+1. Casting `RawRepresentation` defeats the abstraction benefit
+2. MCP approval flow requires `ResponseItem.CreateMcpApprovalResponseItem()` anyway
+3. Direct SDK approach is clearer and matches SDK samples
+
+### What Agent Framework IS Good For
+
+- **Simple streaming** — just text output with `.Text` property
+- **Multi-agent orchestration** — sequential, concurrent, handoff patterns
+- **Graph-based workflows** — streaming with checkpointing
+- **Built-in observability** — OpenTelemetry integration
+- **Tool invocation** — automatic `AIFunction` handling
+
+### Future Consideration
+
+When Agent Framework matures to expose annotations/MCP through its abstractions, we could simplify to:
+```csharp
+// Hypothetical future API
+await foreach (var update in agent.RunStreamingAsync(message, thread))
+{
+    if (update.IsMcpApproval) { }       // Doesn't exist yet
+    if (update.HasAnnotations) { }      // Doesn't exist yet  
+}
+```
+
+Track progress at: https://github.com/microsoft/Agents-for-net
 
 **Resources**:
-- Documentation: https://learn.microsoft.com/en-us/agent-framework/user-guide/agents/agent-types/azure-ai-foundry-agent
-- Samples: https://github.com/microsoft/agent-framework/tree/main/dotnet/samples
+- NuGet: https://www.nuget.org/packages/Microsoft.Agents.AI.AzureAI
+- Documentation: https://learn.microsoft.com/agent-framework/
+- Source: https://github.com/microsoft/Agents-for-net/tree/main/src/libraries
+- API Reference: https://learn.microsoft.com/en-us/dotnet/api/microsoft.agents.ai.chatclientagent.runstreamingasync
 
 ## Migration Notes
 

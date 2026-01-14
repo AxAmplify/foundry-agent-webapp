@@ -171,26 +171,41 @@ app.MapFallbackToFile("index.html");  // MUST BE LAST
 
 **See**: `backend/WebApp.Api/Services/AgentFrameworkService.cs`
 
-**SDK Package**: `Azure.AI.Projects` v1.2.0-beta.5 (main entry point)
-**Sub-namespaces**: `Azure.AI.Projects.OpenAI`, `OpenAI.Responses`
+**SDK Packages**:
+- `Azure.AI.Projects` v1.2.0-beta.5 — Main entry point, v2 Agents API
+- `Microsoft.Agents.AI.AzureAI` v1.0.0-preview.260108.1 — Agent Framework extensions
+
+**Sub-namespaces**: `Azure.AI.Projects.OpenAI`, `OpenAI.Responses`, `Microsoft.Agents.AI`, `Microsoft.Extensions.AI`
 
 **Key patterns**:
 - `IDisposable` implementation with `_agentLock.Dispose()`
 - Disposal guards (`ObjectDisposedException.ThrowIf`) in all public methods
 - Environment-aware credential selection (ChainedTokenCredential vs ManagedIdentityCredential)
-- Cached agent instance with `SemaphoreSlim` for thread safety
+- Cached `ChatClientAgent` instance with `SemaphoreSlim` for thread safety
 - Configuration validation (`AI_AGENT_ENDPOINT`, `AI_AGENT_ID`)
 
-**v2 Agents API** (uses `/agents/` endpoint with human-readable IDs):
+**Agent Loading** (via Microsoft Agent Framework extension methods):
 ```csharp
-// Get agent metadata via v2 Agents API
-AgentRecord agentRecord = await projectClient.Agents.GetAgentAsync(agentId);
-AgentVersion version = agentRecord.Versions.Latest;
+// Uses Agent Framework for simplified agent loading
+ChatClientAgent agent = await projectClient.GetAIAgentAsync(
+    name: agentId,            // Human-readable agent name
+    cancellationToken: ct);
 
-// Use AgentReference for streaming (not the agent object directly)
+// Access AgentVersion from ChatClientAgent for metadata
+AgentVersion? version = agent.GetService<AgentVersion>();
+```
+
+**Streaming** (direct ProjectResponsesClient — required for specialized types):
+```csharp
+// Direct SDK for streaming — IChatClient doesn't expose MCP/annotations
 ProjectResponsesClient responsesClient = projectClient.OpenAI.GetProjectResponsesClientForAgent(
     new AgentReference(agentId), conversationId);
 ```
+
+**Why direct streaming?** The `IChatClient` abstraction doesn't expose:
+- `McpToolCallApprovalRequestItem` for MCP approval flows
+- `FileSearchCallResponseItem` for file search quotes
+- `MessageResponseItem.OutputTextAnnotations` for citations
 
 **Streaming Pattern**: Returns `IAsyncEnumerable<StreamChunk>` where `StreamChunk` contains either:
 - Text delta (`chunk.IsText`, `chunk.TextDelta`)

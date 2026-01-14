@@ -7,7 +7,7 @@
 | **Frontend** | React 19 + Vite | 5173 | `frontend/src/App.tsx` |
 | **Backend** | ASP.NET Core 9 | 8080 | `backend/WebApp.Api/Program.cs` |
 | **Auth** | MSAL.js → JWT Bearer | — | `frontend/src/config/authConfig.ts` |
-| **AI SDK** | Azure.AI.Projects v1.2.0-beta.5 | — | `backend/.../AgentFrameworkService.cs` |
+| **AI SDK** | Azure.AI.Projects + Agent Framework | — | `backend/.../AgentFrameworkService.cs` |
 | **Deploy** | Azure Container Apps | — | `infra/main.bicep` |
 
 **Key Flow**: React → MSAL token → POST /api/chat/stream → AI Foundry → SSE chunks → UI
@@ -47,8 +47,10 @@ runSubagent(
 | `Review Issues` | GitHub issue analysis and categorization | Reviewing issues, prioritizing work, assigning labels |
 | `Review Docs` | Documentation quality assurance | Reviewing READMEs, skills, agents for consistency |
 | `Git Commit` | Git commit with repository standards | Creating detailed commits following conventions |
+| `SDK Research` | SDK version analysis and upgrade planning | Analyzing outdated packages, finding breaking changes, planning updates |
+| `Test Agent` | UI testing with Playwright | Validating theme, new chat, cancel stream, markdown, token usage |
 
-**Workflow**: Use `Review Issues` to analyze issues → `Plan Feature` for implementation design → `Web App Agent` for implementation → `Review Docs` for documentation updates → `Git Commit` for standardized commits.
+**Workflow**: Use `Review Issues` to analyze issues → `Plan Feature` for implementation design → `Web App Agent` for implementation → `Test Agent` for UI validation → `Review Docs` for documentation updates → `Git Commit` for standardized commits. Use `SDK Research` periodically to check for SDK updates.
 
 ## Skills (ALWAYS Load First)
 
@@ -64,3 +66,4 @@ runSubagent(
 | `researching-azure-ai-sdk` | SDK deep-dive |
 | `testing-with-playwright` | Browser testing |
 | `writing-bicep-templates` | Infrastructure |
+| `validating-ui-features` | Theme, new chat, cancel, markdown, token usage |
