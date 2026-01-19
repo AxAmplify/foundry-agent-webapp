@@ -2,6 +2,7 @@
 
 AI-powered web application with Entra ID authentication and Azure AI Foundry Agent Service integration. Deploy to Azure Container Apps with a single command.
 
+## Reference implementation. Not deployed. Used to study patterns for Foundry Agents + ACA + Entra auth.”
 ## Quick Start
 
 ### Using this Template
